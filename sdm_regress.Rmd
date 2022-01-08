@@ -1,0 +1,104 @@
+---
+title: "SDM - Regress"
+author: "Peter Menzies"
+date: "1/5/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+librarian::shelf(
+  DT, dplyr, dismo, GGally, here, readr, tidyr, mgcv)
+select <- dplyr::select # overwrite raster::select
+options(readr.show_col_types = F)
+
+dir_data    <- here("data/sdm")
+pts_env_csv <- file.path(dir_data, "pts_env.csv")
+
+pts_env <- read_csv(pts_env_csv)
+nrow(pts_env)
+```
+
+```{r}
+datatable(pts_env, rownames = F)
+```
+
+```{r}
+GGally::ggpairs(
+  select(pts_env, -ID),
+  aes(color = factor(present)))
+```
+
+```{r}
+# setup model data
+d <- pts_env %>% 
+  select(-ID, -"WC_alt") %>%  # remove terms we don't want to model
+  tidyr::drop_na() # drop the rows with NA values
+nrow(d)
+```
+
+```{r}
+# fit a linear model
+mdl <- lm(present ~ ., data = d)
+summary(mdl)
+```
+
+```{r}
+# showing that without a logistic transformation, the range of our predicted values is outside 0:1 and thus can't be used in their current state
+y_predict <- predict(mdl, d, type="response")
+y_true    <- d$present
+
+range(y_predict)
+```
+
+```{r}
+range(y_true)
+```
+
+```{r}
+mdl <- glm(present ~ ., family = binomial(link="logit"), data = d)
+summary(mdl)
+```
+
+```{r}
+y_predict <- predict(mdl, d, type="response")
+
+range(y_predict)
+```
+
+```{r}
+# show term plots
+termplot(mdl, partial.resid = TRUE, se = TRUE, main = F, ylim="free")
+```
+
+```{r}
+# fit a generalized additive model with smooth predictors
+mdl <- mgcv::gam(
+  formula = present ~ s(WC_bio1) + 
+    s(WC_bio2) + s(WC_bio6) + s(ER_tri) + s(ER_topoWet) + s(lon) + s(lat), 
+  family = binomial(link = "logit"), data = d)
+summary(mdl)
+```
+
+```{r}
+plot(mdl, scale=0)
+```
+
+```{r}
+librarian::shelf(
+  maptools, sf)
+
+mdl_maxent_rds <- file.path(dir_data, "mdl_maxent.rds")
+
+# show version of maxent
+if (!interactive())
+  maxent()
+```
+
+
+
+
+

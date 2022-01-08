@@ -46,12 +46,19 @@ obs <- df %>%
     coords = c("longitude", "latitude"),
     crs = st_crs(4326))
 
-#readr::write_csv(df, obs_csv)
-#geojson_write(obs, geometry = "point", file = obs_geo)
+readr::write_csv(df, obs_csv)
 
+if (!file.exists("data/obs.geojson")) {
+geojson_write(obs, geometry = "point", file = obs_geo)
+}
+```
+
+```{r}
 # show points on map
 mapview::mapview(obs, map.types = "Stamen.Terrain")
 ```
+
+
 ```{r}
 dir_env <- file.path(dir_data, "env")
 
@@ -66,6 +73,8 @@ env_datasets %>%
   select(dataset_code, description, citation) %>% 
   DT::datatable()
 ```
+
+
 ```{r}
 # choose datasets for a vector
 env_datasets_vec <- c("WorldClim", "ENVIREM")
@@ -74,6 +83,8 @@ env_datasets_vec <- c("WorldClim", "ENVIREM")
 env_layers <- sdmpredictors::list_layers(env_datasets_vec)
 DT::datatable(env_layers)
 ```
+
+
 ```{r}
 # choose layers after some inspection and perhaps consulting literature
 env_layers_vec <- c("WC_alt", "WC_bio1", "WC_bio2", "WC_bio6", "ER_tri", "ER_topoWet")
@@ -84,6 +95,8 @@ env_stack <- load_layers(env_layers_vec)
 # interactive plot layers, hiding all but first (select others)
 mapview(env_stack, hide = T)
 ```
+
+
 ```{r}
 obs_hull_geo <- file.path(dir_data, "obs_hull.geojson")
 
@@ -101,7 +114,7 @@ write_sf(obs_hull, obs_hull_geo)
 
 obs_hull_sp <- sf::as_Spatial(obs_hull)
 
-# cropping env raster stack to extenet of convex hull
+# cropping env raster stack to extent of convex hull
 env_stack <- raster::mask(env_stack, obs_hull_sp) %>% 
   raster::crop(extent(obs_hull_sp))
 
@@ -128,6 +141,8 @@ mapview(obs) +
 # using the logical "> -Inf" gives us values of 1 for all values in the first stack layer - we only need present / absent
 r_mask <- mask(x = env_stack[[1]] > -Inf, mask = r_obs, inverse = TRUE)
 
+# creating random pseudo-absence points within the mask we just created
+# because of the relatively small spatial scope and the large number of observations within it, trying to create the same number of absence points as there are observations gives us a point in every pixel from the raster, so it's no longer really random... is this an issue?
 absence <- dismo::randomPoints(r_mask, nrow(obs)) %>% 
   as_tibble() %>% 
   st_as_sf(coords = c("x", "y"), crs = 4326)
@@ -136,8 +151,74 @@ mapview(obs, col.regions = "green") +
   mapview(absence, col.regions = "gray")
 ```
 
+```{r}
+# create combined df of points with absence and presence represented by 0 and 1 respectively in "present" column
+pts <- rbind(
+  obs %>% 
+    mutate(
+      present = 1) %>% 
+    select(present),
+  absence %>% 
+    mutate(
+      present = 0)) %>% 
+  mutate(
+    ID = 1:n()) %>% 
+  relocate(ID)
+
+write_sf(pts, pts_geo)
+```
+
 
 ```{r}
-mapview(r_mask[[1]])
+# extract raster values from env_stack where those layers coincide with 'pts'
+pts_env <- raster::extract(env_stack, as_Spatial(pts), df=TRUE) %>% 
+  tibble() %>% 
+  # join present and geometry columns to raster value results for points
+  left_join(
+    pts %>% 
+      select(ID, present),
+    by = "ID") %>% 
+  relocate(present, .after = ID) %>% 
+  # extract lon, lat as single columns
+  mutate(
+    #present = factor(present),
+    lon = st_coordinates(geometry)[,1],
+    lat = st_coordinates(geometry)[,2]) %>% 
+  select(-geometry)
+
+write_csv(pts_env, pts_env_csv)
 ```
+
+
+```{r}
+pts_env %>% 
+  select(-ID) %>% 
+  DT::datatable()
+```
+
+```{r}
+pts_env_pivot <- pts_env %>% 
+  select(-ID) %>% 
+  mutate(
+    present = factor(present)) %>% 
+  pivot_longer(-present) 
+  
+pts_env_pivot %>% 
+  ggplot() +
+  geom_density(aes(x = value, fill = present)) + 
+  scale_fill_manual(values = alpha(c("gray", "green"), 0.5)) +
+  scale_x_continuous(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  theme_bw() + 
+  facet_wrap(~name, scales = "free") +
+  theme(
+    legend.position = c(1, 0),
+    legend.justification = c(1, 0))
+```
+
+
+
+
+
+
 
