@@ -21,6 +21,8 @@ set.seed(42)
 # directory to store data
 dir_data <- here("data/sdm")
 dir.create(dir_data)
+
+redo <- FALSE
 ```
 
 
@@ -99,6 +101,7 @@ mapview(env_stack, hide = T)
 
 ```{r}
 obs_hull_geo <- file.path(dir_data, "obs_hull.geojson")
+env_stack_grd <- file.path(dir_data, "env_stack.grd")
 
 # make convex hull around points of observation
 obs_hull <- sf::st_convex_hull(st_union(obs))
@@ -109,18 +112,35 @@ mapview(
 ```
 
 ```{r}
-# save obs hull
-write_sf(obs_hull, obs_hull_geo)
-
-obs_hull_sp <- sf::as_Spatial(obs_hull)
-
-# cropping env raster stack to extent of convex hull
-env_stack <- raster::mask(env_stack, obs_hull_sp) %>% 
-  raster::crop(extent(obs_hull_sp))
-
-mapview(obs) + 
-  mapview(env_stack, hide = T)
+# # save obs hull
+# write_sf(obs_hull, obs_hull_geo)
+# 
+# obs_hull_sp <- sf::as_Spatial(obs_hull)
+# 
+# # cropping env raster stack to extent of convex hull
+# env_stack <- raster::mask(env_stack, obs_hull_sp) %>% 
+#   raster::crop(extent(obs_hull_sp))
+# 
+# mapview(obs) + 
+#   mapview(env_stack, hide = T)
 ```
+
+
+```{r}
+if (!file.exists(env_stack_grd) | redo){
+  obs_hull_sp <- sf::as_Spatial(obs_hull)
+  env_stack <- raster::mask(env_stack, obs_hull_sp) %>% 
+    raster::crop(extent(obs_hull_sp))
+  writeRaster(env_stack, env_stack_grd, overwrite=T)  
+}
+env_stack <- stack(env_stack_grd)
+
+# show map
+# mapview(obs) + 
+#   mapview(env_stack, hide = T) # makes html too big for Github
+plot(env_stack, nc=2)
+```
+
 
 ```{r}
 absence_geo <- file.path(dir_data, "absence.geojson")
