@@ -15,6 +15,7 @@ librarian::shelf(
   caret,       # m: modeling framework
   dplyr, ggplot2 ,here, readr, 
   pdp,         # X: partial dependence plots
+  ranger,      # m: random forest modeling
   rpart,       # m: recursive partition modeling
   rpart.plot,  # m: recursive partition plotting
   rsample,     # d: split train/test data
@@ -81,7 +82,7 @@ mdl
 ```{r}
 rpart.plot(mdl)
 
-# plot complexity parameter (CP - desired increase in fit to justify additional split)
+# plot complexity parameter (CP - minimum improvement in the model needed at each node)
 plotcp(mdl)
 
 # rpart cross validation results
@@ -99,4 +100,54 @@ mdl_caret <- train(
 
 ggplot(mdl_caret)
 ```
+
+```{r}
+vip(mdl_caret, num_features = 40, bar = FALSE)
+```
+
+```{r}
+# Construct partial dependence plots
+p1 <- partial(mdl_caret, pred.var = "WC_alt") %>% autoplot()
+p2 <- partial(mdl_caret, pred.var = "WC_bio6") %>% autoplot()
+p3 <- partial(mdl_caret, pred.var = c("WC_alt", "WC_bio6")) %>% 
+  plotPartial(levelplot = FALSE, zlab = "yhat", drape = TRUE, 
+              colorkey = TRUE, screen = list(z = -20, x = -60))
+
+# Display plots side by side
+gridExtra::grid.arrange(p1, p2, p3, ncol = 3)
+```
+
+
+```{r}
+# number of features
+n_features <- length(setdiff(names(d_train), "present"))
+
+# fit a default random forest model
+mdl_rf <- ranger(present ~ ., data = d_train)
+
+# get out of the box RMSE
+(default_rmse <- sqrt(mdl_rf$prediction.error))
+```
+
+```{r}
+# re-run model with impurity-based variable importance
+mdl_impurity <- ranger(
+  present ~ ., data = d_train,
+  importance = "impurity")
+
+# re-run model with permutation-based variable importance
+mdl_permutation <- ranger(
+  present ~ ., data = d_train,
+  importance = "permutation")
+p1 <- vip::vip(mdl_impurity, bar = FALSE)
+p2 <- vip::vip(mdl_permutation, bar = FALSE)
+
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+```
+
+
+
+
+
+
 

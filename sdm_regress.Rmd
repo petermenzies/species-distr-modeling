@@ -35,7 +35,7 @@ GGally::ggpairs(
 ```{r}
 # setup model data
 d <- pts_env %>% 
-  select(-ID, -"WC_bio6", -"ER_topoWet") %>%  # remove terms we don't want to model
+  select(-ID, -"WC_alt", -"WC_bio6", -"ER_topoWet", -"ER_tri") %>%  # remove terms we don't want to model
   tidyr::drop_na() # drop the rows with NA values
 nrow(d)
 ```
@@ -77,8 +77,8 @@ termplot(mdl, partial.resid = TRUE, se = TRUE, main = F, ylim="free")
 ```{r}
 # fit a generalized additive model with smooth predictors
 mdl <- mgcv::gam(
-  formula = present ~ s(WC_alt) + s(WC_bio1) + 
-    s(WC_bio2) + s(ER_tri) + s(lon) + s(lat), 
+  formula = present ~ s(WC_bio1) + 
+    s(WC_bio2) + s(lon) + s(lat), 
   family = binomial(link = "logit"), data = d)
 summary(mdl)
 ```
