@@ -2,11 +2,14 @@
 title: "Species Distribution Modeling"
 author: "Peter Menzies"
 date: "1/23/2022"
-output: html_document
+output:
+  distill::distill_article:
+    toc: true
+    toc_float: true
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
 
 librarian::shelf(
   dismo, dplyr, DT, ggplot2, here, htmltools, leaflet, mapview, purrr, raster, readr, rgbif, rgdal, rJava, sdmpredictors, sf, spocc, tidyr, mgcv, GGally, caret, pdp, ranger, rpart, rpart.plot, rsample, skimr, vip, usdm)
@@ -17,16 +20,18 @@ librarian::shelf(
 
 select <- dplyr::select # overwrite raster::select
 
-options(readr.show_col_types = F)
+options(readr.show_col_types = F,
+        DT.options = list(pageLength = 5))
 
 # set random seed for reproducibility
 set.seed(42)
 
-# directory to store data
-dir_data <- here("data/sdm")
-dir.create(dir_data)
-pts_env_csv <- file.path(dir_data, "pts_env.csv")
-pts_env <- read_csv(pts_env_csv)
+# paths
+dir_data      <- here("data/sdm")
+pts_env_csv   <- file.path(dir_data, "pts_env.csv")
+pts_geo       <- file.path(dir_data, "pts.geojson")
+env_stack_grd <- file.path(dir_data, "env_stack.grd")
+mdl_maxv_rds  <- file.path(dir_data, "mdl_maxent_vif.rds")
 
 redo <- FALSE
 ```
@@ -292,8 +297,7 @@ GGally::ggpairs(
 # setup model data
 d <- pts_env %>% 
   select(-ID, -"WC_alt", -"WC_bio6", -"ER_topoWet", -"ER_tri") %>%  # remove terms we don't want to model
-  tidyr::drop_na() %>% 
-  mutate(present = factor(present))
+  tidyr::drop_na()
 nrow(d)
 ```
 
@@ -491,7 +495,9 @@ p3 <- partial(mdl_caret, pred.var = c("WC_bio1", "lat")) %>%
 # Display plots side by side
 gridExtra::grid.arrange(p1, p2, p3, ncol = 3)
 ```
+Here we move from a single tree to an ensemble of trees using the `ranger` random forest implementation. This can be a highly effective way to mitigate overfitting that can come about with decision trees.
 
+First with default params:
 
 ```{r}
 # number of features
@@ -503,6 +509,8 @@ mdl_rf <- ranger(present ~ ., data = d_train)
 # get out of the box RMSE
 (default_rmse <- sqrt(mdl_rf$prediction.error))
 ```
+
+Then with impurity-based and permutation-based variable importance:
 
 ```{r}
 # re-run model with impurity-based variable importance
@@ -522,15 +530,19 @@ gridExtra::grid.arrange(p1, p2, nrow = 1)
 
 
 
-
-
-
-
-
-
-
 ## Evaluation
 
+In this last stage we'll attempt to optimize our model by evaluating performance and calibrating parameters.
+
+```{r}
+# read points of observation: presence (1) and absence (0)
+pts <- read_sf(pts_geo)
+
+# read raster stack of environment
+env_stack <- raster::stack(env_stack_grd)
+```
+
+Once again splitting the dataset 80/20 into training and testing sets.
 
 ```{r}
 # create training set with 80% of full data
@@ -551,7 +563,8 @@ pts_train_a <- pts_train %>%
 ```{r}
 pairs(env_stack)
 ```
-Next, we explore and try to mitigate some of the multicollinearity in our explanatory variables with techniques in the `usdm` package.
+
+Next, we explore and try to mitigate some of the multicollinearity in our explanatory variables with techniques from the `usdm` package.
 
 ```{r}
 # calculate variance inflation factor per predictor, a metric of multicollinearity between variables
@@ -594,6 +607,7 @@ plot(mdl_maxv)
 response(mdl_maxv)
 ```
 
+We use `maxent` to create a new model using the refined explanatory variables.
 
 ```{r}
 # predict
@@ -604,6 +618,7 @@ data(wrld_simpl, package="maptools")
 plot(wrld_simpl, add=TRUE, border='dark grey')
 ```
 
+Then we evaluate the model using `dismo::evaluate()`
 
 ```{r}
 pts_test_p <- pts_test %>% 
@@ -624,14 +639,17 @@ e <- dismo::evaluate(
 e
 ```
 
+Then using the model evaluation object that's returned we can find a threshold value for assigning presence or absence. We do this with `dismo::threshold()`.
 
 ```{r}
 thr <- threshold(e)[['spec_sens']]
 thr
 ```
 
+We test the estimated values from our latest model against the threshold value to determine which points the model and threshold deem as present and as absent. Then we construct a confusion matrix to help evaluate performance.
 
 ```{r}
+# extract values from y_maxv raseter and locations in pts_test_p/a and compare them to thr value
 p_true <- na.omit(raster::extract(y_maxv, pts_test_p) >= thr)
 a_true <- na.omit(raster::extract(y_maxv, pts_test_a) < thr)
 
@@ -649,6 +667,7 @@ matrix(
     c("present_pred", "absent_pred")))
 ```
 
+Last part of our evaluation will be to plot an ROC curve and a point representing the values from our threshold. 
 
 ```{r}
 # add point to ROC plot
@@ -657,6 +676,7 @@ plot(e, 'ROC')
 points(fpr, tpr, pch=23, bg="blue")
 ```
 
+Based on the evaluation, this model predicts presence very well, although the false negative rate (~27%) is concerning---particularly when it comes to modeling that could inform management of endangered species. Moving forward I would most likely try a slightly lower threshold or adjust other model parameters. Here is our predicted distribution:
 
 ```{r}
 plot(y_maxv > thr)
