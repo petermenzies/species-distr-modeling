@@ -1,0 +1,702 @@
+---
+title: "Species Distribution Modeling"
+author: "Peter Menzies"
+date: "1/23/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+librarian::shelf(
+  dismo, dplyr, DT, ggplot2, here, htmltools, leaflet, mapview, purrr, raster, readr, rgbif, rgdal, rJava, sdmpredictors, sf, spocc, tidyr, mgcv, GGally, caret, pdp, ranger, rpart, rpart.plot, rsample, skimr, vip, usdm)
+
+
+# used geojsonio locally, but won't install on Taylor
+#library(geojsonio)
+
+select <- dplyr::select # overwrite raster::select
+
+options(readr.show_col_types = F)
+
+# set random seed for reproducibility
+set.seed(42)
+
+# directory to store data
+dir_data <- here("data/sdm")
+dir.create(dir_data)
+pts_env_csv <- file.path(dir_data, "pts_env.csv")
+pts_env <- read_csv(pts_env_csv)
+
+redo <- FALSE
+```
+
+## Overview
+
+*Nomascus leucogenys*, commonly known as the southern yellow-cheeked gibbon, is a primate species native to southeast Asia. They display striking sexual dimorphism through their highly contrasted coloration in males and females---adult males being almost entirely black aside from their namesake yellow facial hair, and females being almost entirely golden-blonde. Unfortunately, like many other primates, this gibbon species is considered endangered. The following analysis attempts to model their occurrence using open source, community science driven data and machine learning techniques.
+
+## Exploration
+
+In this initial portion of the analysis we fetch observations from Global Biodiversity Information Facility (GBIF.org) using `spocc::occ` which interfaces with the GBIF API.
+
+```{r}
+obs_csv <- file.path(dir_data, "obs.csv")
+obs_geo <- file.path(dir_data, "obs.geojson")
+
+# get species occurrence data from GBIF with coordinates
+if (!file.exists(obs_geo) | redo){
+  (res <- spocc::occ(
+    query = 'Nomascus gabriellae', 
+    from = 'gbif', 
+    has_coords = T,
+    limit = 10000))
+
+  df <- res$gbif$data[[1]] 
+  nrow(df) # number of rows
+  
+  obs <- df %>% 
+    sf::st_as_sf(
+      coords = c("longitude", "latitude"),
+      crs = st_crs(4326))
+  
+  readr::write_csv(df, obs_csv)
+  
+  geojson_write(obs, geometry = "point", file = obs_geo)
+}
+
+obs <- sf::read_sf(obs_geo)
+nrow(obs) # number of rows
+```
+
+Removing "preserved specimens" (likely in museum collections) from the dataset.
+
+```{r}
+# Removing observation of a preserved specimen
+obs <- obs %>% 
+  filter(basisOfRecord != "PRESERVED_SPECIMEN")
+```
+
+Here we take a look at the spatial distribution of the queried observations.
+
+```{r}
+# show points on map
+mapview::mapview(obs, map.types = "Stamen.Terrain")
+```
+
+Next, we view and assess a list of datasets containing potentially useful environmental data using `sdmppredictors`.
+
+```{r}
+dir_env <- file.path(dir_data, "env")
+
+# set a default data directory
+options(sdmpredictors_datadir = dir_env)
+
+# choosing terrestrial
+env_datasets <- sdmpredictors::list_datasets(terrestrial = TRUE, marine = FALSE)
+
+# show table of datasets
+env_datasets %>% 
+  select(dataset_code, description, citation) %>% 
+  DT::datatable()
+```
+
+Then we look at the layers within the datasets of interest.
+
+```{r}
+# choose datasets for a vector
+env_datasets_vec <- c("WorldClim", "ENVIREM")
+
+# get layers
+env_layers <- sdmpredictors::list_layers(env_datasets_vec)
+DT::datatable(env_layers)
+```
+
+And finally, after skimming the literature surrounding the species, we select the layers we think will best predict occurrence, and load them into a raster stack.
+
+```{r}
+# choose layers after some inspection and perhaps consulting literature
+env_layers_vec <- c("WC_alt", "WC_bio1", "WC_bio2", "WC_bio6", "ER_tri", "ER_topoWet")
+
+# get layers
+env_stack <- load_layers(env_layers_vec)
+
+# interactive plot layers, hiding all but first (select others)
+plot(env_stack, nc = 2)
+```
+
+Here, we create a convex hull around the species observations. This will denote the range in which the modeling will take place. Because there are a high concentration of observations within a relatively small range, and the spatial resolution of the environmental rasterstack is limited, we're going to expand the range by buffering the convex hull---this will ultimately allow for some degree of randomness in our pseudo-absence points while having an equal amount of presence and absence points.
+
+```{r}
+obs_hull_geo <- file.path(dir_data, "obs_hull.geojson")
+env_stack_grd <- file.path(dir_data, "env_stack.grd")
+
+if (!file.exists(obs_hull_geo) | redo){
+  # make convex hull around points of observation
+  obs_hull <- sf::st_convex_hull(st_union(obs))
+  
+  # add buffer to allow more area for random absence points
+  obs_hull_buffer <- st_buffer(obs_hull, 50000)
+  
+  # save obs hull
+  write_sf(obs_hull_buffer, obs_hull_geo)
+}
+obs_hull <- read_sf(obs_hull_geo)
+
+# show points on map
+mapview(
+  list(obs, obs_hull))
+```
+
+Then we'll crop the rasterstack to the range of the hull above.
+
+```{r}
+obs_hull_sp <- sf::as_Spatial(obs_hull)
+
+# cropping env raster stack to extent of convex hull
+env_stack <- raster::mask(env_stack, obs_hull_sp) %>%
+  raster::crop(extent(obs_hull_sp))
+
+writeRaster(env_stack, env_stack_grd, overwrite = TRUE)
+
+mapview(obs) +
+  mapview(env_stack, hide = T)
+```
+
+Taking a look at each of the raster layers.
+
+```{r}
+if (!file.exists(env_stack_grd) | redo){
+  obs_hull_sp <- sf::as_Spatial(obs_hull)
+  env_stack <- raster::mask(env_stack, obs_hull_sp) %>% 
+    raster::crop(extent(obs_hull_sp))
+  writeRaster(env_stack, env_stack_grd, overwrite=T)  
+}
+env_stack <- stack(env_stack_grd)
+
+# show map
+# mapview(obs) + 
+#   mapview(env_stack, hide = T) # makes html too big for Github
+plot(env_stack, nc = 2)
+```
+
+Next we create our random pseudo-absence points. First we create a raster that represents observation counts using the 'template' of one of the env_stack layers so that they have the same extent and resolution. Then we create a mask that has pixel values of 1 throughout the same extent except for pixels where observations were recorded. This mask provides the possible locations for the pseudo-absence points that we generate next using `dismo::randomPoints`---we create an amount equal to the number of true observations. Here they are plotted along with the observations:
+
+```{r}
+absence_geo <- file.path(dir_data, "absence.geojson")
+pts_geo     <- file.path(dir_data, "pts.geojson")
+pts_env_csv <- file.path(dir_data, "pts_env.csv")
+
+if (!file.exists(absence_geo) | redo){
+# creating raster of observation counts within the same pixels as the env_stack layers
+  r_obs <- obs %>% 
+    sf::as_Spatial() %>% 
+    rasterize(y = env_stack[[1]], field = 1, fun = 'count')
+
+  # create a mask representing locations where the species was NOT observed (inverse=TRUE) within the bounds of the raster stack
+  # using the logical "> -Inf" gives us a raster for x that has values of 1 for all pixels from the first stack layer
+  r_mask <- mask(x = env_stack[[1]] > -Inf, mask = r_obs, inverse = TRUE)
+  
+  # creating random pseudo-absence points within the mask we just created
+  absence <- dismo::randomPoints(r_mask, nrow(obs)) %>% 
+    as_tibble() %>% 
+    st_as_sf(coords = c("x", "y"), crs = 4326)
+  
+  write_sf(absence, absence_geo, delete_dsn = TRUE)
+}
+absence <- read_sf(absence_geo)
+
+mapview(obs, col.regions = "green") + 
+  mapview(absence, col.regions = "gray")
+```
+
+The main purpose of everything up to this point was to create a single dataframe that contains all the environmental parameter values associated with each pixel in our range, and whether or not a yellow-cheeked gibbon was observed there. That's what we do here. First by creating a combined spatial df of observation and absence points, assigning a value of 1 to presence and 0 to absence---and then by extracting the values from all environmental layers associated with each observation and joining the two sets of data by their ID. As a result, we get this data table that will be the basis of all the modeling to come:
+
+```{r}
+if (!file.exists(pts_env_csv) | redo) {
+  
+  # create combined df of points with absence and presence represented by 0 and 1 respectively in "present" column
+  pts <- rbind(
+    obs %>% mutate(present = 1) %>% select(present),
+    absence %>% mutate(present = 0)) %>% 
+    mutate(ID = 1:n()) %>% relocate(ID)
+  
+  write_sf(pts, pts_geo)
+  
+  # extract all layer pixel values from `env_stack` where the points in `pts` occur
+  pts_env <- raster::extract(env_stack, as_Spatial(pts), df=TRUE) %>% 
+    tibble() %>% 
+    # join present and geometry columns to raster value results for points
+    left_join(
+      pts %>% 
+        select(ID, present),
+      by = "ID") %>% 
+    relocate(present, .after = ID) %>% 
+    # extract lon, lat as single columns
+    mutate(
+      #present = factor(present),
+      lon = st_coordinates(geometry)[,1],
+      lat = st_coordinates(geometry)[,2]) %>% 
+    select(-geometry)
+  
+  write_csv(pts_env, pts_env_csv)
+}
+
+pts_env <- read_csv(pts_env_csv)
+
+pts_env %>% 
+  # show first 10 presence, last 10 absence
+  slice(c(1:10, (nrow(pts_env)-9):nrow(pts_env))) %>% 
+  DT::datatable(
+    rownames = F,
+    options = list(
+      dom = "t",
+      pageLength = 20))
+```
+
+```{r}
+pts_env %>% 
+  select(-ID) %>% 
+  mutate(
+  present = factor(present)) %>% 
+  pivot_longer(-present) %>% 
+  ggplot() +
+  geom_density(aes(x = value, fill = present)) + 
+  scale_fill_manual(values = alpha(c("gray", "green"), 0.5)) +
+  scale_x_continuous(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  theme_bw() + 
+  facet_wrap(~name, scales = "free") +
+  theme(
+    legend.position = c(1, 0),
+    legend.justification = c(1, 0))
+```
+
+
+## Regression
+
+In this part of the analysis we will employ several forms of linear regression as well as maximum entropy to estimate models for *Nomascus leucogenys* occurrence. 
+
+```{r}
+datatable(pts_env, rownames = F)
+```
+
+Here we look for instances of correlation between our explanatory variables and remove those that might increase model error.
+
+```{r}
+GGally::ggpairs(
+  select(pts_env, -ID),
+  aes(color = factor(present)))
+```
+
+```{r}
+# setup model data
+d <- pts_env %>% 
+  select(-ID, -"WC_alt", -"WC_bio6", -"ER_topoWet", -"ER_tri") %>%  # remove terms we don't want to model
+  tidyr::drop_na() %>% 
+  mutate(present = factor(present))
+nrow(d)
+```
+
+First we try multiple linear regression.
+
+```{r}
+# fit a linear model
+mdl <- lm(present ~ ., data = d)
+summary(mdl)
+```
+
+In order to use the predicted responses from this model, we need to transform the values such that they range from 0 to 1, and then we can predict presence based on which of the two values the output is closer to. We use the logit transformation as our "link function" in `glm()` to accomplish this.
+
+```{r}
+# showing that without a logistic transformation, the range of our predicted values is outside 0:1 and thus can't be used in their current state
+y_predict <- predict(mdl, d, type="response")
+y_true    <- d$present
+
+range(y_predict)
+```
+
+```{r}
+# and we need them to range from 0 to 1 as presence and absence are represented
+range(y_true)
+```
+
+```{r}
+mdl <- glm(present ~ ., family = binomial(link="logit"), data = d)
+summary(mdl)
+```
+
+Success!
+
+```{r}
+# showing values are now between 0 and 1
+y_predict <- predict(mdl, d, type="response")
+
+range(y_predict)
+```
+
+Here we take a look at the individual relationships of each environmental parameter on presence.
+
+```{r}
+# show term plots
+termplot(mdl, partial.resid = TRUE, se = TRUE, main = F, ylim="free")
+```
+
+Next we try out a generalized additive model with smooth predictors, and take a look at the termplots.
+
+```{r}
+# fit a generalized additive model with smooth predictors
+mdl <- mgcv::gam(
+  formula = present ~ s(WC_bio1) + 
+    s(WC_bio2) + s(lon) + s(lat), 
+  family = binomial(link = "logit"), data = d)
+summary(mdl)
+```
+
+```{r}
+plot(mdl, scale=0)
+```
+And lastly, we employ one of the most widely used machine learning techniques for SDM: maximum entropy.
+
+```{r}
+librarian::shelf(
+  maptools, sf)
+
+mdl_maxent_rds <- file.path(dir_data, "mdl_maxent.rds")
+
+# show version of maxent
+if (!interactive())
+  maxent()
+```
+
+```{r}
+env_stack_grd <- file.path(dir_data, "env_stack.grd")
+env_stack <- stack(env_stack_grd)
+plot(env_stack, nc=2)
+```
+Here's shown variable contributions according to the maxent model and associated termplots: 
+
+```{r}
+# get presence-only observation points (maxent extracts raster values for you)
+obs_geo <- file.path(dir_data, "obs.geojson")
+obs_sp <- read_sf(obs_geo) %>% 
+  sf::as_Spatial() # maxent prefers sp::SpatialPoints over newer sf::sf class
+
+# fit a maximum entropy model
+if (!file.exists(mdl_maxent_rds)){
+  mdl <- maxent(env_stack, obs_sp)
+  readr::write_rds(mdl, mdl_maxent_rds)
+}
+mdl <- read_rds(mdl_maxent_rds)
+
+# plot variable contributions per predictor
+plot(mdl)
+```
+
+```{r}
+# plot term plots
+response(mdl)
+```
+And here are presence predictions from the maxent model:
+
+```{r}
+# predict
+y_predict <- predict(env_stack, mdl) #, ext=ext, progress='')
+
+plot(y_predict, main='Maxent, raw prediction')
+data(wrld_simpl, package="maptools")
+plot(wrld_simpl, add=TRUE, border='dark grey')
+```
+
+
+## Decision trees
+
+In this part, we use decision trees to model presence, both in their singular form and in their aggregate form (random forest).
+
+First step is to split dataset into training and testing sets with `rsample`.
+
+```{r}
+# create training set with 80% of full data
+d_split  <- rsample::initial_split(d, prop = 0.8, strata = "present")
+d_train  <- rsample::training(d_split) %>% 
+  mutate(present = factor(present))
+
+# show number of rows present is 0 vs 1
+table(d$present)
+```
+```{r}
+table(d_train$present)
+```
+
+```{r}
+# run decision stump model
+mdl <- rpart(
+  present ~ ., data = d_train, 
+  control = list(
+    cp = 0, minbucket = 5, maxdepth = 1))
+mdl
+```
+
+Testing the waters with a basic one split tree:
+
+```{r}
+# plot tree
+par(mar = c(1, 1, 1, 1)) # setting plotting parameter for margin size
+rpart.plot(mdl)
+```
+
+Now we a tree with default parameters, and take a look at model error as a function of the complexity parameter.
+
+```{r}
+# decision tree with defaults
+mdl <- rpart(present ~ ., data = d_train)
+mdl
+```
+
+
+```{r}
+rpart.plot(mdl)
+
+# plot complexity parameter (CP - minimum improvement in the model needed at each node)
+plotcp(mdl)
+
+# rpart cross validation results
+mdl$cptable
+```
+Then we cross validate using `caret` and look at variable importance and partial dependence using the results.
+
+```{r}
+# caret cross validation results
+mdl_caret <- train(
+  present ~ .,
+  data       = d_train,
+  method     = "rpart",
+  trControl  = trainControl(method = "cv", number = 10),
+  tuneLength = 20)
+
+ggplot(mdl_caret)
+```
+
+```{r}
+vip(mdl_caret, num_features = 40, bar = FALSE)
+```
+
+```{r}
+# Construct partial dependence plots
+p1 <- partial(mdl_caret, pred.var = "WC_bio1") %>% autoplot()
+p2 <- partial(mdl_caret, pred.var = "lat") %>% autoplot()
+p3 <- partial(mdl_caret, pred.var = c("WC_bio1", "lat")) %>% 
+  plotPartial(levelplot = FALSE, zlab = "yhat", drape = TRUE, 
+              colorkey = TRUE, screen = list(z = -20, x = -60))
+
+# Display plots side by side
+gridExtra::grid.arrange(p1, p2, p3, ncol = 3)
+```
+
+
+```{r}
+# number of features
+n_features <- length(setdiff(names(d_train), "present"))
+
+# fit a default random forest model
+mdl_rf <- ranger(present ~ ., data = d_train)
+
+# get out of the box RMSE
+(default_rmse <- sqrt(mdl_rf$prediction.error))
+```
+
+```{r}
+# re-run model with impurity-based variable importance
+mdl_impurity <- ranger(
+  present ~ ., data = d_train,
+  importance = "impurity")
+
+# re-run model with permutation-based variable importance
+mdl_permutation <- ranger(
+  present ~ ., data = d_train,
+  importance = "permutation")
+p1 <- vip::vip(mdl_impurity, bar = FALSE)
+p2 <- vip::vip(mdl_permutation, bar = FALSE)
+
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+```
+
+
+
+
+
+
+
+
+
+
+## Evaluation
+
+
+```{r}
+# create training set with 80% of full data
+pts_split  <- rsample::initial_split(
+  pts, prop = 0.8, strata = "present")
+pts_train  <- rsample::training(pts_split)
+pts_test   <- rsample::testing(pts_split)
+
+pts_train_p <- pts_train %>% 
+  filter(present == 1) %>% 
+  as_Spatial()
+pts_train_a <- pts_train %>% 
+  filter(present == 0) %>% 
+  as_Spatial()
+```
+
+
+```{r}
+pairs(env_stack)
+```
+Next, we explore and try to mitigate some of the multicollinearity in our explanatory variables with techniques in the `usdm` package.
+
+```{r}
+# calculate variance inflation factor per predictor, a metric of multicollinearity between variables
+vif(env_stack)
+```
+
+
+```{r}
+# stepwise reduce predictors, based on a max correlation of 0.7 (max 1)
+v <- vifcor(env_stack, th=0.7) 
+v
+```
+
+
+```{r}
+# reduce environmental raster stack by 
+env_stack_v <- usdm::exclude(env_stack, v)
+
+# show pairs plot after multicollinearity reduction with vifcor()
+pairs(env_stack_v)
+```
+
+Now we can create a new rasterstack to feed into `maxent()` that excludes the variables with higher collinearity.
+
+```{r}
+# fit a maximum entropy model
+if (!file.exists(mdl_maxv_rds)){
+  mdl_maxv <- maxent(env_stack_v, sf::as_Spatial(pts_train))
+  readr::write_rds(mdl_maxv, mdl_maxv_rds)
+}
+mdl_maxv <- read_rds(mdl_maxv_rds)
+
+# plot variable contributions per predictor
+plot(mdl_maxv)
+```
+
+
+```{r}
+# plot term plots
+response(mdl_maxv)
+```
+
+
+```{r}
+# predict
+y_maxv <- predict(mdl_maxv, env_stack) #, ext=ext, progress='')
+
+plot(y_maxv, main='Maxent, raw prediction')
+data(wrld_simpl, package="maptools")
+plot(wrld_simpl, add=TRUE, border='dark grey')
+```
+
+
+```{r}
+pts_test_p <- pts_test %>% 
+  filter(present == 1) %>% 
+  as_Spatial()
+pts_test_a <- pts_test %>% 
+  filter(present == 0) %>% 
+  as_Spatial()
+
+y_maxv <- predict(mdl_maxv, env_stack)
+#plot(y_maxv)
+
+e <- dismo::evaluate(
+  p     = pts_test_p,
+  a     = pts_test_a, 
+  model = mdl_maxv,
+  x     = env_stack)
+e
+```
+
+
+```{r}
+thr <- threshold(e)[['spec_sens']]
+thr
+```
+
+
+```{r}
+p_true <- na.omit(raster::extract(y_maxv, pts_test_p) >= thr)
+a_true <- na.omit(raster::extract(y_maxv, pts_test_a) < thr)
+
+# (t)rue/(f)alse (p)ositive/(n)egative rates
+tpr <- sum(p_true)/length(p_true)
+fnr <- sum(!p_true)/length(p_true)
+fpr <- sum(!a_true)/length(a_true)
+tnr <- sum(a_true)/length(a_true)
+
+matrix(
+  c(tpr, fnr,
+    fpr, tnr), 
+  nrow=2, dimnames = list(
+    c("present_obs", "absent_obs"),
+    c("present_pred", "absent_pred")))
+```
+
+
+```{r}
+# add point to ROC plot
+plot(e, 'ROC')
+
+points(fpr, tpr, pch=23, bg="blue")
+```
+
+
+```{r}
+plot(y_maxv > thr)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
