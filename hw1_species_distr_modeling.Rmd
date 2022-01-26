@@ -38,7 +38,11 @@ redo <- FALSE
 
 ## Overview
 
-*Nomascus leucogenys*, commonly known as the southern yellow-cheeked gibbon, is a primate species native to southeast Asia. They display striking sexual dimorphism through their highly contrasted coloration in males and females---adult males being almost entirely black aside from their namesake yellow facial hair, and females being almost entirely golden-blonde. Unfortunately, like many other primates, this gibbon species is considered endangered. The following analysis attempts to model their occurrence using open source, community science driven data and machine learning techniques.
+*Nomascus leucogenys*, commonly known as the southern yellow-cheeked gibbon, is a primate species native to southeast Asia. They display striking sexual dimorphism through their highly contrasted coloration in males and females---adult males being almost entirely black aside from their namesake yellow facial hair, and females being almost entirely golden-blonde. Unfortunately, like many other primates, this gibbon species is considered endangered. The following analysis attempts to model their distribution using open source, community science driven data and machine learning techniques.
+
+And here are said gibbons in all their highly contrasted glory:
+
+![yellow-cheeked gibbons](yellow_cheeked_gibbons.jpeg)
 
 ## Exploration
 
@@ -75,6 +79,8 @@ nrow(obs) # number of rows
 
 Removing "preserved specimens" (likely in museum collections) from the dataset.
 
+**This was the only data cleaning/wrangling that I had to do**
+
 ```{r}
 # Removing observation of a preserved specimen
 obs <- obs %>% 
@@ -82,6 +88,8 @@ obs <- obs %>%
 ```
 
 Here we take a look at the spatial distribution of the queried observations.
+
+**There are 235 observations for this species on GBIF**
 
 ```{r}
 # show points on map
@@ -117,6 +125,8 @@ DT::datatable(env_layers)
 ```
 
 And finally, after skimming the literature surrounding the species, we select the layers we think will best predict occurrence, and load them into a raster stack.
+
+**This species is not thoroughly researched and there is still much to learn about their exact habitat preferences and the full extent of their range. However, it is known that these gibbons, unlike many of their relatives, prefer wet lowland forest---typically tropical evergreen, but have also been observed in deciduous forests and bamboo stands [New England Primate Conservancy](https://www.neprimateconservancy.org/yellow-cheeked-gibbon.html). Because of this uncertainty, I made sure to include elevation as parameter and from there selected layers that contained broadly-applicable environmental parameters.**
 
 ```{r}
 # choose layers after some inspection and perhaps consulting literature
@@ -279,7 +289,7 @@ pts_env %>%
 
 ## Regression
 
-In this part of the analysis we will employ several forms of linear regression as well as maximum entropy to estimate models for *Nomascus leucogenys* occurrence. 
+In this part of the analysis we will employ several forms of linear regression as well as maximum entropy to estimate models for *Nomascus leucogenys* distribution. 
 
 ```{r}
 datatable(pts_env, rownames = F)
@@ -296,7 +306,7 @@ GGally::ggpairs(
 ```{r}
 # setup model data
 d <- pts_env %>% 
-  select(-ID, -"WC_alt", -"WC_bio6", -"ER_topoWet", -"ER_tri") %>%  # remove terms we don't want to model
+  select(-ID, -"WC_alt", -"WC_bio6", -"ER_topoWet", -"ER_tri") %>%  # remove terms to reduce collinearity
   tidyr::drop_na()
 nrow(d)
 ```
@@ -359,6 +369,8 @@ summary(mdl)
 ```{r}
 plot(mdl, scale=0)
 ```
+**The variables and value ranges that seem to contribute most to presence include `lat` between ~12.25 and 12.5~ degrees North, `WC_bio2` between ~8.0 and ~9.0 degrees C, and `WC_bio1` between ~21 and ~24 degrees C.**
+
 And lastly, we employ one of the most widely used machine learning techniques for SDM: maximum entropy.
 
 ```{r}
@@ -400,6 +412,9 @@ plot(mdl)
 # plot term plots
 response(mdl)
 ```
+
+**The variables and value ranges that seem to contribute most to presence include `WC_alt` below ~500m, `WC_bio1` between ~20 and ~35 degrees C, and `WC_bio2` between ~10 and ~20 degrees C. This differs from the GAM results in part due to the fact that I removed `WC_alt` from my GAM becuase it was introducing collinearity and radically increasing the error. Maxent seemed to handle the collinear variables better and (as the literature suggested), altitude appears to have played an important role in distribution. `WC_bio1` and `WC_bio2` seem to have been represented similarly in both model termplots.**
+
 And here are presence predictions from the maxent model:
 
 ```{r}
@@ -460,13 +475,15 @@ mdl
 ```{r}
 rpart.plot(mdl)
 
-# plot complexity parameter (CP - minimum improvement in the model needed at each node)
+# plot complexity parameter (CP - minimum improvement in the model desired to qualify an additional split)
 plotcp(mdl)
 
 # rpart cross validation results
 mdl$cptable
 ```
-Then we cross validate using `caret` and look at variable importance and partial dependence using the results.
+**Based on the complexity plot threshold, a tree of size 8 is recommended according to Brieman's 1-SE rule.**
+
+we then cross validate using `caret` and look at variable importance and partial dependence using the results.
 
 ```{r}
 # caret cross validation results
@@ -483,6 +500,8 @@ ggplot(mdl_caret)
 ```{r}
 vip(mdl_caret, num_features = 40, bar = FALSE)
 ```
+
+**Based on the rpart model, `lat`, `WC_bio1`, and `lon` are the top three most important variables.**
 
 ```{r}
 # Construct partial dependence plots
@@ -528,6 +547,7 @@ p2 <- vip::vip(mdl_permutation, bar = FALSE)
 gridExtra::grid.arrange(p1, p2, nrow = 1)
 ```
 
+**Our random forest model offers a slightly different picture of variable importance---according to the rf model, `lon` is more important than `WC-bio` (as opposed to the rpart model), and `WC_bio2` is shown to have greater importance than the rpart model suggested. Because random forests offer so much more variability in tree structures and allow for a degree of randomness to reveal otherwise overlooked importance, I would be much more inclined to trust these results over the single decision tree.**
 
 
 ## Evaluation
@@ -600,6 +620,8 @@ mdl_maxv <- read_rds(mdl_maxv_rds)
 # plot variable contributions per predictor
 plot(mdl_maxv)
 ```
+
+**VIF collinearity removal excluded `ER_topowet`, `WC_bio6`, and `WC-alt`. The most important variables from greatest to lowest are now estimated as `WC_bio2`, `ER_tri`, and `WC_bio1`.
 
 
 ```{r}
